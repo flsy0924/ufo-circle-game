@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>ミステリーサークル制作UFO</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #222; display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100vh; font-family: sans-serif; color: #fff; }
+    .bar { width: 360px; display: flex; justify-content: space-between; align-items: center; margin: 6px 0; }
+    button { background: #555; color: #fff; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px; }
+    button.active { background: #e6b422; color: #000; }
+    button.go { background: #4caf50; font-size: 14px; }
+    .box { position: relative; width: 360px; height: 520px; border: 3px solid #fff; border-radius: 4px; overflow: hidden; }
+    canvas { position: absolute; top: 0; left: 0; touch-action: none; }
+    .overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.88); display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 20px; text-align: center; z-index: 10; }
+    .desc { font-size: 12px; color: #ddd; text-align: left; background: rgba(255,255,255,0.1); padding: 12px; border-radius: 6px; margin: 14px 0; line-height: 1.6; }
+  </style>
+</head>
+
+<body>
+  <div class="bar" style="justify-content: flex-end; height: 24px;">
+    <span id="hud" style="font-size: 14px; font-weight: bold; visibility: hidden;">TIME: 60.0s | 0 pts</span>
+  </div>
+
+  <div class="box">
+    <canvas id="cField" width="360" height="520"></canvas>
+    <canvas id="cGuide" width="360" height="520"></canvas>
+    <canvas id="cUfo" width="360" height="520"></canvas>
+
+    <!-- スタート＆モード選択画面 -->
+    <div id="startScreen" class="overlay">
+      <h2 style="color:#e6b422; margin:0;">🛸 ミステリーサークルUFO</h2>
+      <div id="menuHighScore" style="color:#00ff66; font-weight:bold; margin-top:6px;">HIGH SCORE: 0 pts</div>
+      <div class="desc">
+        <b>【遊び方】</b><br>
+        ・画面をなぞって光線で小麦を倒そう！<br>
+        ・<b>60秒アタック</b>：60秒間でお題通りになぞって「完成！」を押すと得点。確率で<b>8秒間の牛吸い込みボーナス</b>が発生！<br>
+        ・<b>フリー</b>：制限時間なしで自由に模様を描けます。
+      </div>
+      <button class="active" style="width:200px; margin-bottom:10px; font-size:15px;" onclick="startGame('normal')">60秒アタック開始</button>
+      <button style="width:200px; font-size:15px;" onclick="startGame('free')">フリーモードで遊ぶ</button>
+    </div>
+
+    <!-- 終了リザルト画面 -->
+    <div id="resultScreen" class="overlay" style="display:none;">
+      <h2 id="resTitle" style="color:#e6b422; margin:0;">TIME UP!</h2>
+      <div id="finalScore" style="font-size:36px; font-weight:bold; margin:16px 0;">0 pts</div>
+      <div id="resultHighScore" style="color:#00ff66; font-size:14px; margin-bottom:14px;">HIGH SCORE: 0 pts</div>
+      <button id="resRetryBtn" class="active" style="width:180px; margin-bottom:10px;" onclick="startGame('normal')">もう一回遊ぶ</button>
+      <button style="width:180px;" onclick="showMenu()">モード選択へ</button>
+    </div>
+  </div>
+
+  <div class="bar">
+    <button id="bReset" onclick="resetField()">描き直す</button>
+    <button id="bNext" class="go" onclick="completeStage()">完成！次へ</button>
+    <button id="bJudgeFree" class="go" style="display:none;" onclick="judgeFreeMode()">完成！採点する</button>
+    <button id="bEndFree" style="display:none;" onclick="showMenu()">終了</button>
+  </div>
+
+  <script>
+    const fCtx = document.getElementById('cField').getContext('2d');
+    const gCtx = document.getElementById('cGuide').getContext('2d');
+    const uCanvas = document.getElementById('cUfo');
+    const uCtx = uCanvas.getContext('2d');
+    const pCan = document.createElement('canvas'); pCan.width = 360; pCan.height = 520;
+    const pCtx = pCan.getContext('2d', { willReadFrequently: true });
+    const tCan = document.createElement('canvas'); tCan.width = 360; tCan.height = 520;
+    const tCtx = tCan.getContext('2d', { willReadFrequently: true });
+
+    let mode = 'normal', stageIdx = 0, score = 0, timeLeft = 60.0, bonusLeft = 0;
+    let highScore = Number(localStorage.getItem('ufo_high_score')) || 0;
+    document.getElementById('menuHighScore').textContent = `HIGH SCORE: ${highScore} pts`;
+    let isOver = true, isBonus = false, isDraw = false;
+    let lastPos = null, ufo = { x: 180, y: 260 }, cows = [], lastT = 0, rafId = null;
+    let popups = [];
+
+    const stages = [
+      (c) => { c.beginPath(); c.arc(180, 260, 85, 0, Math.PI * 2); c.stroke(); },
+      (c) => { c.beginPath(); c.arc(180, 260, 105, 0, Math.PI * 2); c.stroke(); c.beginPath(); c.arc(180, 260, 45, 0, Math.PI * 2); c.stroke(); },
+      (c) => { c.beginPath(); c.moveTo(180, 150); c.lineTo(280, 330); c.lineTo(80, 330); c.closePath(); c.stroke(); },
+      (c) => { c.beginPath(); c.moveTo(180, 140); c.lineTo(180, 380); c.moveTo(60, 260); c.lineTo(300, 260); c.stroke(); c.beginPath(); c.arc(180, 260, 80, 0, Math.PI * 2); c.stroke(); }
+    ];
+
+    function showMenu() {
+      isOver = true; cancelAnimationFrame(rafId);
+      document.getElementById('hud').style.visibility = 'hidden';
+      document.getElementById('startScreen').style.display = 'flex';
+      document.getElementById('resultScreen').style.display = 'none';
+    }
+
+    function startGame(m) {
+      mode = m;
+      document.getElementById('startScreen').style.display = 'none';
+      document.getElementById('resultScreen').style.display = 'none';
+      
+      // モードに合わせてボタンを切り替え
+      document.getElementById('bNext').style.display = m === 'normal' ? 'inline-block' : 'none';
+      document.getElementById('bJudgeFree').style.display = m === 'free' ? 'inline-block' : 'none';
+      document.getElementById('bEndFree').style.display = m === 'free' ? 'inline-block' : 'none';
+      document.getElementById('hud').style.visibility = m === 'normal' ? 'visible' : 'hidden';
+      
+      score = 0; timeLeft = 60.0; isOver = false; isBonus = false; stageIdx = 0;
+      popups = [];
+      if (m === 'normal') {
+        setupStage(); lastT = performance.now();
+        cancelAnimationFrame(rafId); rafId = requestAnimationFrame(loop);
+      } else {
+        resetField();
+      }
+    }
+
+    function loop(now) {
+      if (mode !== 'normal' || isOver) return;
+      const dt = (now - lastT) / 1000; lastT = now;
+      timeLeft -= dt;
+      if (timeLeft <= 0) {
+        timeLeft = 0; isOver = true; 
+        updateHud(); renderUfo();
+        updatePopups(dt);
+        if (score > highScore) {
+          highScore = score;
+          localStorage.setItem('ufo_high_score', highScore); // 端末内に安全に保存
+        }
+        document.getElementById('resTitle').textContent = 'TIME UP!';
+        document.getElementById('resultHighScore').style.display = 'block';
+        document.getElementById('resRetryBtn').textContent = 'もう一回遊ぶ';
+        document.getElementById('resRetryBtn').onclick = () => startGame('normal');
+        
+        document.getElementById('finalScore').textContent = `${score} pts`;
+        document.getElementById('resultHighScore').textContent = `HIGH SCORE: ${highScore} pts`;
+        document.getElementById('resultScreen').style.display = 'flex';
+        return;
+      }
+      if (isBonus) {
+        bonusLeft -= dt;
+        if (bonusLeft <= 0) {
+          isBonus = false;
+          isDraw = false;
+          lastPos = null;
+          stageIdx = Math.floor(Math.random() * stages.length);
+          setupStage();
+        } else {
+          updateCows(dt);
+        }
+      }
+      updatePopups(dt);
+      updateHud(); renderUfo();
+      rafId = requestAnimationFrame(loop);
+    }
+
+    function updateHud() {
+      document.getElementById('hud').textContent = isBonus
+        ? `★BONUS(${bonusLeft.toFixed(1)}s)★ 残り${timeLeft.toFixed(0)}s | ${score} pts`
+        : `TIME: ${timeLeft.toFixed(1)}s | ${score} pts`;
+    }
+
+    function resetField() {
+      fCtx.fillStyle = isBonus ? '#558b2f' : '#e6b422';
+      fCtx.fillRect(0, 0, 360, 520);
+      fCtx.fillStyle = isBonus ? '#33691e' : '#d4a017';
+      for (let y = 0; y < 520; y += 6) fCtx.fillRect(0, y, 360, 2);
+      gCtx.clearRect(0, 0, 360, 520); pCtx.clearRect(0, 0, 360, 520); tCtx.clearRect(0, 0, 360, 520);
+      if (mode === 'normal' && !isBonus) {
+        [gCtx, tCtx].forEach((c, i) => {
+          c.strokeStyle = i === 0 ? 'rgba(255,255,255,0.55)' : '#fff';
+          c.lineWidth = 14; c.lineCap = 'round'; c.lineJoin = 'round';
+          if (i === 0) c.setLineDash([8, 8]);
+          stages[stageIdx](c);
+          c.setLineDash([]);
+        });
+      }
+      renderUfo();
+    }
+
+    function setupStage() {
+      resetField();
+      document.getElementById('bNext').style.visibility = isBonus ? 'hidden' : 'visible';
+      document.getElementById('bReset').style.visibility = isBonus ? 'hidden' : 'visible';
+      if (isBonus) {
+        bonusLeft = 8.0;
+        cows = Array.from({ length: 6 }, () => ({ x: 40 + Math.random() * 280, y: 80 + Math.random() * 380, vx: (Math.random() - 0.5) * 80, vy: (Math.random() - 0.5) * 80, lift: 0, dir: 1 }));
+      }
+    }
+
+    function completeStage() {
+      if (isOver || isBonus) return;
+      const tImg = tCtx.getImageData(0, 0, 360, 520).data;
+      const pImg = pCtx.getImageData(0, 0, 360, 520).data;
+      let tPx = 0, mPx = 0, ePx = 0;
+      for (let i = 3; i < tImg.length; i += 16) {
+        if (tImg[i] > 50) { tPx++; if (pImg[i] > 50) mPx++; }
+        else if (pImg[i] > 50) ePx++;
+      }
+      if (tPx > 0) {
+        const cov = Math.min(1, (mPx / tPx) * 1.25);
+        const pen = (ePx / tPx) * 0.2;
+        const pts = Math.max(0, Math.round((cov - pen) * 100)); // ★ここで pts を定義
+        score += pts;
+        addPopup(`+${pts} pts!`, 180, 260, pts >= 80 ? '#00ff66' : '#ffeb3b');
+      }
+      isBonus = (Math.random() < 0.35);
+      if (!isBonus) {
+        let nextIdx;
+        do {
+          nextIdx = Math.floor(Math.random() * stages.length);
+        } while (nextIdx === stageIdx && stages.length > 1);
+        stageIdx = nextIdx;
+      }
+      setupStage();
+    }
+    
+    function judgeFreeMode() {
+      const w = 360, h = 520;
+      const img = pCtx.getImageData(0, 0, w, h).data;
+      let drawnPx = 0, symMatch = 0, totalCheck = 0;
+
+      // 描かれた量と左右対称性をチェック
+      for (let y = 0; y < h; y += 4) {
+        for (let x = 0; x < w / 2; x += 4) {
+          const leftIdx = (y * w + x) * 4 + 3;
+          const rightIdx = (y * w + (w - 1 - x)) * 4 + 3;
+          const hasL = img[leftIdx] > 50;
+          const hasR = img[rightIdx] > 50;
+
+          if (hasL) drawnPx++;
+          if (hasR) drawnPx++;
+          if (hasL || hasR) {
+            totalCheck++;
+            if (hasL && hasR) symMatch++;
+          }
+        }
+      }
+
+      if (drawnPx === 0) return; // 何も描いていないときは反応しない
+
+      // 対称性スコア（最大60点）＋ ボリューム適正スコア（最大40点）
+      const symScore = totalCheck > 0 ? (symMatch / totalCheck) * 60 : 0;
+      const ratio = drawnPx / ((w * h) / 16); // 画面全体の何割塗ったか
+      const volScore = ratio < 0.25 ? (ratio / 0.25) * 40 : Math.max(10, 40 - (ratio - 0.25) * 80);
+      const artScore = Math.min(100, Math.max(10, Math.round(symScore + volScore)));
+
+      // 結果画面をフリーモード用に書き換えて表示
+      document.getElementById('resTitle').textContent = artScore >= 80 ? '🛸 宇宙芸術認定！' : '✨ サークル完成！';
+      document.getElementById('finalScore').textContent = `${artScore} 点`;
+      document.getElementById('resultHighScore').style.display = 'none';
+      document.getElementById('resRetryBtn').textContent = '新しく描く';
+      document.getElementById('resRetryBtn').onclick = () => {
+        document.getElementById('resultScreen').style.display = 'none';
+        resetField();
+      };
+      document.getElementById('resultScreen').style.display = 'flex';
+    }
+
+    function updateCows(dt) {
+      for (let i = cows.length - 1; i >= 0; i--) {
+        const c = cows[i];
+        if (isDraw && Math.hypot(c.x - ufo.x, c.y - ufo.y) < 35) {
+          c.lift += 65 * dt; c.x += (ufo.x - c.x) * 3 * dt; c.y += (ufo.y - c.y) * 3 * dt;
+          if (c.lift >= 45) {
+            cows[i] = { x: 40 + Math.random() * 280, y: 80 + Math.random() * 380, vx: (Math.random() - 0.5) * 80, vy: (Math.random() - 0.5) * 80, lift: 0, dir: 1 };
+            score += 50;
+            addPopup('+50 pts!', ufo.x, ufo.y - 50, '#00ff66');
+          }
+        } else {
+          if (c.lift > 0) c.lift = Math.max(0, c.lift - 40 * dt);
+          c.x += c.vx * dt; c.y += c.vy * dt;
+          if (c.x < 30 || c.x > 330) { c.vx *= -1; c.dir = c.vx > 0 ? 1 : -1; }
+          if (c.y < 60 || c.y > 480) c.vy *= -1;
+        }
+      }
+    }
+    
+    function addPopup(text, x, y, color = '#ffeb3b') {
+      popups.push({ text, x, y, color, life: 1.0 });
+    }
+    
+    // 時間の経過と移動の計算（loopの中で呼ぶ）
+    function updatePopups(dt) {
+      for (let i = popups.length - 1; i >= 0; i--) {
+        const p = popups[i];
+        p.y -= 40 * dt;
+        p.life -= 1.0 * dt;
+        if (p.life <= 0) popups.splice(i, 1);
+      }
+    }
+
+    // 画面への描画（renderUfoの最後で呼ぶ）
+    function drawPopups() {
+      for (const p of popups) {
+        uCtx.save();
+        uCtx.globalAlpha = Math.max(0, p.life);
+        uCtx.font = 'bold 22px sans-serif';
+        uCtx.textAlign = 'center';
+        uCtx.strokeStyle = '#000';
+        uCtx.lineWidth = 4;
+        uCtx.strokeText(p.text, p.x, p.y);
+        uCtx.fillStyle = p.color;
+        uCtx.fillText(p.text, p.x, p.y);
+        uCtx.restore();
+      }
+    }
+
+
+    function drawLine(a, b) {
+      if (isBonus) return;
+      [fCtx, pCtx].forEach((c, i) => {
+        c.strokeStyle = i === 0 ? '#7a590a' : '#fff';
+        c.lineWidth = 14; c.lineCap = 'round'; c.lineJoin = 'round';
+        c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(b.x, b.y); c.stroke();
+      });
+    }
+
+    function renderUfo() {
+      uCtx.clearRect(0, 0, 360, 520);
+      if (isBonus) cows.forEach(c => {
+        const sc = 1 - c.lift / 90;
+        uCtx.save(); uCtx.translate(c.x, c.y - c.lift); uCtx.scale(c.dir * sc, sc);
+        uCtx.fillStyle = '#fff'; uCtx.fillRect(-12, -8, 24, 14);
+        uCtx.fillStyle = '#222'; uCtx.fillRect(-5, -5, 6, 6); uCtx.fillRect(3, -1, 5, 5);
+        uCtx.fillStyle = '#fff'; uCtx.fillRect(10, -10, 8, 8);
+        uCtx.restore();
+      });
+      const hy = ufo.y - 45;
+      if (isDraw) {
+        const bw = isBonus ? 28 : 14;
+        uCtx.fillStyle = 'rgba(50, 255, 100, 0.45)';
+        uCtx.beginPath(); uCtx.moveTo(ufo.x - 8, hy); uCtx.lineTo(ufo.x + 8, hy);
+        uCtx.lineTo(ufo.x + bw, ufo.y); uCtx.lineTo(ufo.x - bw, ufo.y); uCtx.fill();
+      }
+      uCtx.fillStyle = '#b0bec5'; uCtx.beginPath(); uCtx.ellipse(ufo.x, hy, 26, 10, 0, 0, Math.PI * 2); uCtx.fill();
+      uCtx.fillStyle = '#4dd0e1'; uCtx.beginPath(); uCtx.arc(ufo.x, hy - 4, 12, Math.PI, 0); uCtx.fill();
+      drawPopups(); // ★追加：UFOより手前に必ずポイント文字を描画する
+    }
+
+    function getPos(e) {
+      const r = uCanvas.getBoundingClientRect();
+      const cx = e.touches ? e.touches[0].clientX : e.clientX;
+      const cy = e.touches ? e.touches[0].clientY : e.clientY;
+      return { x: cx - r.left, y: cy - r.top };
+    }
+
+    uCanvas.addEventListener('pointerdown', e => { if (isOver) return; isDraw = true; lastPos = ufo = getPos(e); drawLine(ufo, ufo); renderUfo(); });
+    uCanvas.addEventListener('pointermove', e => { const p = getPos(e); ufo = p; if (isDraw) { drawLine(lastPos, p); lastPos = p; } renderUfo(); });
+    window.addEventListener('pointerup', () => { isDraw = false; lastPos = null; renderUfo(); });
+
+    resetField();
+  </script>
+</body>
+</html>
